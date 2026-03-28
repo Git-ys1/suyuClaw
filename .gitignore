@@ -1,0 +1,6 @@
+# Ignore local release artifacts by default
+releases/*
+!releases/state/
+releases/state/*
+!releases/state/*.enc
+!releases/state/*.sha256
