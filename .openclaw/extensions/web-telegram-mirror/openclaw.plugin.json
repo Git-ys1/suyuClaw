@@ -1,0 +1,68 @@
+{
+  "id": "web-telegram-mirror",
+  "name": "Web Telegram Mirror",
+  "description": "Phase B skeleton for Web -> Telegram mirror with observeOnly mode",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "mainSessionKey": {
+        "type": "string",
+        "default": "agent:main:main"
+      },
+      "observeOnly": {
+        "type": "boolean",
+        "default": true,
+        "description": "When true, only log mirror decisions and extracted target; do not send Telegram messages"
+      },
+      "sourceTtlMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "default": 120000
+      },
+      "dedupeTtlMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "default": 600000
+      },
+      "dedupeMaxEntries": {
+        "type": "integer",
+        "minimum": 64,
+        "default": 1024
+      },
+      "senderIds": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "openclaw-control-ui",
+          "webchat-ui",
+          "webchat"
+        ]
+      },
+      "filters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "skipEmpty": {
+            "type": "boolean",
+            "default": true
+          },
+          "skipHeartbeatAck": {
+            "type": "boolean",
+            "default": true
+          },
+          "skipSystemLike": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}
