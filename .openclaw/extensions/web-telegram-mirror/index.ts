@@ -4,7 +4,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 const DEFAULT_CONFIG = {
   enabled: true,
   mainSessionKey: "agent:main:main",
-  observeOnly: true,
+  observeOnly: false,
   sourceTtlMs: 120000,
   dedupeTtlMs: 600000,
   dedupeMaxEntries: 1024,
@@ -40,6 +40,10 @@ function parseConfig(raw) {
       skipSystemLike: filters.skipSystemLike ?? DEFAULT_CONFIG.filters.skipSystemLike,
     },
   };
+}
+
+function getTelegramSender(api) {
+  return api?.runtime?.channel?.telegram?.sendMessageTelegram;
 }
 
 function nowMs() {
@@ -163,7 +167,7 @@ function resolveTelegramTarget(entry) {
 export default definePluginEntry({
   id: "web-telegram-mirror",
   name: "Web Telegram Mirror",
-  description: "Phase B observeOnly skeleton for Web -> Telegram mirror",
+  description: "Web -> Telegram mirror with live send support",
   register(api) {
     const cfg = parseConfig(api.pluginConfig);
 
@@ -232,9 +236,28 @@ export default definePluginEntry({
         `[web-telegram-mirror] decision=mirror observeOnly=${String(cfg.observeOnly)} session=${ctx?.sessionKey || ""} to=${target.to} accountId=${target.accountId || ""} threadId=${target.threadId ?? ""} targetSource=${target.source} preview=${JSON.stringify(preview)}`,
       );
 
-      if (!cfg.observeOnly) {
-        api.logger.warn(
-          "[web-telegram-mirror] observeOnly=false but real Telegram send is intentionally not implemented in Phase B",
+      if (cfg.observeOnly) return;
+
+      const sendMessageTelegram = getTelegramSender(api);
+      if (typeof sendMessageTelegram !== "function") {
+        api.logger.warn("[web-telegram-mirror] skip: telegram-runtime-unavailable");
+        return;
+      }
+
+      try {
+        const sendResult = await sendMessageTelegram(target.to, assistantText, {
+          accountId: target.accountId,
+          messageThreadId: target.threadId,
+          textMode: "html",
+          plainText: assistantText,
+        });
+        api.logger.info(
+          `[web-telegram-mirror] sent: session=${ctx?.sessionKey || ""} to=${target.to} messageId=${sendResult?.messageId || ""}`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        api.logger.error(
+          `[web-telegram-mirror] send-failed: session=${ctx?.sessionKey || ""} to=${target.to} error=${JSON.stringify(message)}`,
         );
       }
     });

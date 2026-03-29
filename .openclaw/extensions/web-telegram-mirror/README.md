@@ -1,19 +1,17 @@
-# web-telegram-mirror (Phase B)
+# web-telegram-mirror
 
-Minimal workspace plugin skeleton for the Web -> Telegram mainline mirror task.
+Workspace plugin for Web -> Telegram mainline mirroring.
 
-## Scope in this phase
+## Current behavior
 
 - Hooks used: `before_dispatch` + `agent_end`
 - Only evaluates candidate mirror turns from Web/Control UI into main session
 - Extracts Telegram target from session store (`deliveryContext`, fallback `lastRoute`)
 - Includes dedupe cache (TTL + max entries)
-- `observeOnly=true` logs decision/target/preview only
-- No real Telegram send is executed in Phase B
+- Default behavior is now **live send** (`observeOnly=false`)
+- Set `observeOnly=true` to switch back to dry-run logging only
 
 ## Placement
-
-This plugin is placed at:
 
 - `.openclaw/extensions/web-telegram-mirror/index.ts`
 
@@ -30,7 +28,7 @@ This matches OpenClaw workspace plugin discovery (`<workspace>/.openclaw/extensi
         config: {
           enabled: true,
           mainSessionKey: "agent:main:main",
-          observeOnly: true,
+          observeOnly: false,
           senderIds: ["openclaw-control-ui", "webchat-ui", "webchat"]
         }
       }
@@ -39,12 +37,13 @@ This matches OpenClaw workspace plugin discovery (`<workspace>/.openclaw/extensi
 }
 ```
 
-## Expected logs in observeOnly
+## Expected logs
 
 On a matched Web turn:
 
 - `source marked: ...` from `before_dispatch`
-- `decision=mirror observeOnly=true ...` from `agent_end`
+- `decision=mirror observeOnly=false ...` from `agent_end`
+- `sent: ...` after Telegram delivery succeeds
 
 On filtered turns:
 
@@ -52,8 +51,8 @@ On filtered turns:
 - `skip: no-telegram-target`
 - `skip: dedupe-hit`
 
-## Not included yet
+## Notes
 
-- Real call to `api.runtime.channel.telegram.sendMessageTelegram(...)`
-- End-to-end send verification against Telegram
-- Retry/metrics/reporting refinements
+- This mirrors assistant replies from Web/Control UI to Telegram.
+- It does **not** mirror Telegram replies back into Telegram, so it should not self-echo on normal use.
+- If needed, `observeOnly=true` remains available for troubleshooting.
