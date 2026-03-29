@@ -29,6 +29,7 @@ const DEFAULT_CONFIG = {
     voice: "zh-CN-XiaoxiaoNeural",
     rate: "+8%",
     pitch: "+12Hz",
+    scriptPath: "/home/yusu/.openclaw/workspace/skills/telegram-voice-tts/scripts/telegram_voice.py",
   },
 };
 
@@ -64,6 +65,7 @@ function parseConfig(raw) {
       voice: typeof voice.voice === "string" ? voice.voice : DEFAULT_CONFIG.voice.voice,
       rate: typeof voice.rate === "string" ? voice.rate : DEFAULT_CONFIG.voice.rate,
       pitch: typeof voice.pitch === "string" ? voice.pitch : DEFAULT_CONFIG.voice.pitch,
+      scriptPath: typeof voice.scriptPath === "string" ? voice.scriptPath : DEFAULT_CONFIG.voice.scriptPath,
     },
   };
 }
@@ -234,21 +236,16 @@ function cleanupFile(filePath) {
   }
 }
 
-async function generateVoiceMp3(text, cfg) {
+async function generateVoiceOgg(text, cfg) {
   mkdirSync(cfg.voice.tempDir, { recursive: true });
-  const filePath = join(cfg.voice.tempDir, `voice-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
-  await execFileAsync("edge-tts", [
-    "--voice",
-    cfg.voice.voice,
-    "--rate",
-    cfg.voice.rate,
-    "--pitch",
-    cfg.voice.pitch,
-    "--text",
-    text,
-    "--write-media",
-    filePath,
-  ]);
+  const filePath = join(cfg.voice.tempDir, `voice-${Date.now()}-${Math.random().toString(36).slice(2)}.ogg`);
+  const env = {
+    ...process.env,
+    EDGE_TTS_VOICE: cfg.voice.voice,
+    EDGE_TTS_RATE: cfg.voice.rate,
+    EDGE_TTS_PITCH: cfg.voice.pitch,
+  };
+  await execFileAsync("python3", [cfg.voice.scriptPath, text, filePath], { env });
   return filePath;
 }
 
@@ -285,12 +282,12 @@ async function sendVoiceMirror(api, target, text, cfg, logContext = "") {
 
   let mediaPath;
   try {
-    mediaPath = await generateVoiceMp3(text, cfg);
-    const sendResult = await sendMessageTelegram(target.to, "", {
+    mediaPath = await generateVoiceOgg(text, cfg);
+    const sendResult = await sendMessageTelegram(target.to, "[[audio_as_voice]]", {
       accountId: target.accountId,
       messageThreadId: target.threadId,
       mediaUrl: mediaPath,
-      mediaLocalRoots: [cfg.voice.tempDir, tmpdir(), "/tmp"],
+      mediaLocalRoots: [cfg.voice.tempDir, tmpdir(), "/tmp", "/home/yusu/.openclaw/workspace/skills/telegram-voice-tts/scripts"],
       asVoice: true,
       plainText: text,
     });
@@ -406,12 +403,12 @@ export default definePluginEntry({
 
       if (cfg.observeOnly) return;
 
+      let voiceOk = false;
       if (cfg.voice.enabled && cfg.voice.assistantVoiceOnly) {
-        const ok = await sendVoiceMirror(api, target, assistantText, cfg, `session=${ctx?.sessionKey || ""}`);
-        if (ok) return;
+        voiceOk = await sendVoiceMirror(api, target, assistantText, cfg, `session=${ctx?.sessionKey || ""}`);
       }
 
-      await sendTextMirror(api, target, assistantText, "sent", `session=${ctx?.sessionKey || ""}`);
+      await sendTextMirror(api, target, assistantText, voiceOk ? "sent-text-after-voice" : "sent", `session=${ctx?.sessionKey || ""}`);
     });
   },
 });

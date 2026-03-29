@@ -139,7 +139,7 @@
 - **Web → Telegram 主线镜像插件**
 
 当前已有：
-- `plans/web-telegram-mirror-plan.md`
+- `plans/projects/web-telegram-mirror/plan.md`
 
 下一阶段：
 - 由砚秋完成技术探针与插件骨架设计
