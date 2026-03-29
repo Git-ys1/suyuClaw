@@ -121,6 +121,29 @@ function extractLastAssistantText(messages) {
   return "";
 }
 
+function stripReplyTag(text) {
+  return text.replace(/^\s*\[\[\s*reply_to(?:\s*:\s*[^\]]+|_current)\s*\]\]\s*/i, "");
+}
+
+function stripMarkdownArtifacts(text) {
+  return text
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/(?<!\*)\*(?!\*)(.*?) (?<!\*)\*(?!\*)/g, "$1")
+    .replace(/(?<!_)_(?!_)(.*?) (?<!_)_(?!_)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^>\s?/gm, "")
+    .replace(/\[(.*?)\]\((https?:\/\/[^\s)]+)\)/g, "$1: $2");
+}
+
+function normalizeMirrorText(text) {
+  const cleaned = stripMarkdownArtifacts(stripReplyTag(text))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned;
+}
+
 function shouldSkipText(text, filters) {
   if (filters.skipEmpty && !text) return "skip-empty";
   if (filters.skipHeartbeatAck && text === "HEARTBEAT_OK") return "skip-heartbeat-ack";
@@ -194,7 +217,8 @@ export default definePluginEntry({
       const sourceFromCtx = ctx?.channelId === "webchat" || ctx?.messageProvider === "webchat";
       if (!sourceFromCache && !sourceFromCtx) return;
 
-      const assistantText = extractLastAssistantText(event?.messages);
+      const rawAssistantText = extractLastAssistantText(event?.messages);
+      const assistantText = normalizeMirrorText(rawAssistantText);
       const skipReason = shouldSkipText(assistantText, cfg.filters);
       if (skipReason) {
         api.logger.info(
@@ -248,7 +272,6 @@ export default definePluginEntry({
         const sendResult = await sendMessageTelegram(target.to, assistantText, {
           accountId: target.accountId,
           messageThreadId: target.threadId,
-          textMode: "html",
           plainText: assistantText,
         });
         api.logger.info(
