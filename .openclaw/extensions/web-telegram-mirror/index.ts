@@ -380,6 +380,33 @@ function appendVoiceLinkToMessage(message, linkLine) {
   return message;
 }
 
+function appendVoiceMediaToMessage(message, mediaUrl) {
+  if (!message || typeof message !== "object" || !mediaUrl) return message;
+  const next = { ...message };
+  const audioBlock = { type: "audio", url: mediaUrl };
+  if (Array.isArray(next.content)) {
+    const blocks = [...next.content];
+    const hasSameAudio = blocks.some(
+      (block) => block && typeof block === "object" && block.type === "audio" && block.url === mediaUrl,
+    );
+    if (!hasSameAudio) {
+      blocks.push(audioBlock);
+      next.content = blocks;
+      return next;
+    }
+    return message;
+  }
+  if (typeof next.content === "string") {
+    next.content = [{ type: "text", text: next.content }, audioBlock];
+    return next;
+  }
+  if (typeof next.text === "string") {
+    next.content = [{ type: "text", text: next.text }, audioBlock];
+    return next;
+  }
+  return message;
+}
+
 function stripVoiceLinkSuffix(text, cfg) {
   const label = (cfg.voice.webLink.label || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!label) return text;
@@ -486,7 +513,8 @@ export default definePluginEntry({
       const linkLine = cfg.voice.webLink.linkTemplate
         .replace("{label}", cfg.voice.webLink.label)
         .replace("{url}", prepared.mediaUrl);
-      const patchedMessage = appendVoiceLinkToMessage(msg, linkLine);
+      const withAudio = appendVoiceMediaToMessage(msg, prepared.mediaUrl);
+      const patchedMessage = appendVoiceLinkToMessage(withAudio, linkLine);
       if (patchedMessage === msg) return;
       return { message: patchedMessage };
     });
