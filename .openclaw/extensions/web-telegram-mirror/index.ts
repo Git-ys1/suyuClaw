@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_CONFIG = {
   enabled: true,
@@ -14,6 +21,15 @@ const DEFAULT_CONFIG = {
     skipHeartbeatAck: true,
     skipSystemLike: true,
   },
+  voice: {
+    enabled: true,
+    assistantVoiceOnly: true,
+    prefix: "【Web】",
+    tempDir: join(tmpdir(), "web-telegram-mirror-voice"),
+    voice: "zh-CN-XiaoxiaoNeural",
+    rate: "+8%",
+    pitch: "+12Hz",
+  },
 };
 
 const recentSourceBySession = new Map();
@@ -25,6 +41,7 @@ function parseConfig(raw) {
   const senderIds = Array.isArray(cfg.senderIds)
     ? cfg.senderIds.filter((v) => typeof v === "string")
     : DEFAULT_CONFIG.senderIds;
+  const voice = cfg.voice && typeof cfg.voice === "object" ? cfg.voice : {};
 
   return {
     enabled: cfg.enabled ?? DEFAULT_CONFIG.enabled,
@@ -38,6 +55,15 @@ function parseConfig(raw) {
       skipEmpty: filters.skipEmpty ?? DEFAULT_CONFIG.filters.skipEmpty,
       skipHeartbeatAck: filters.skipHeartbeatAck ?? DEFAULT_CONFIG.filters.skipHeartbeatAck,
       skipSystemLike: filters.skipSystemLike ?? DEFAULT_CONFIG.filters.skipSystemLike,
+    },
+    voice: {
+      enabled: voice.enabled ?? DEFAULT_CONFIG.voice.enabled,
+      assistantVoiceOnly: voice.assistantVoiceOnly ?? DEFAULT_CONFIG.voice.assistantVoiceOnly,
+      prefix: typeof voice.prefix === "string" ? voice.prefix : DEFAULT_CONFIG.voice.prefix,
+      tempDir: typeof voice.tempDir === "string" ? voice.tempDir : DEFAULT_CONFIG.voice.tempDir,
+      voice: typeof voice.voice === "string" ? voice.voice : DEFAULT_CONFIG.voice.voice,
+      rate: typeof voice.rate === "string" ? voice.rate : DEFAULT_CONFIG.voice.rate,
+      pitch: typeof voice.pitch === "string" ? voice.pitch : DEFAULT_CONFIG.voice.pitch,
     },
   };
 }
@@ -137,8 +163,12 @@ function stripMarkdownArtifacts(text) {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1: $2");
 }
 
+function stripLeadingTimestamp(text) {
+  return text.replace(/^\[[^\]]+\]\s*/m, "");
+}
+
 function normalizeMirrorText(text) {
-  return stripMarkdownArtifacts(stripReplyTag(text)).replace(/\n{3,}/g, "\n\n").trim();
+  return stripLeadingTimestamp(stripMarkdownArtifacts(stripReplyTag(text))).replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function shouldSkipText(text, filters) {
@@ -196,7 +226,33 @@ function loadSessionStoreEntry(api, sessionKey, agentId) {
   }
 }
 
-async function sendMirror(api, target, text, logPrefix, logContext = "") {
+function cleanupFile(filePath) {
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // ignore cleanup failures
+  }
+}
+
+async function generateVoiceMp3(text, cfg) {
+  mkdirSync(cfg.voice.tempDir, { recursive: true });
+  const filePath = join(cfg.voice.tempDir, `voice-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+  await execFileAsync("edge-tts", [
+    "--voice",
+    cfg.voice.voice,
+    "--rate",
+    cfg.voice.rate,
+    "--pitch",
+    cfg.voice.pitch,
+    "--text",
+    text,
+    "--write-media",
+    filePath,
+  ]);
+  return filePath;
+}
+
+async function sendTextMirror(api, target, text, logPrefix, logContext = "") {
   const sendMessageTelegram = getTelegramSender(api);
   if (typeof sendMessageTelegram !== "function") {
     api.logger.warn(`[web-telegram-mirror] skip: telegram-runtime-unavailable ${logContext}`.trim());
@@ -220,6 +276,39 @@ async function sendMirror(api, target, text, logPrefix, logContext = "") {
   }
 }
 
+async function sendVoiceMirror(api, target, text, cfg, logContext = "") {
+  const sendMessageTelegram = getTelegramSender(api);
+  if (typeof sendMessageTelegram !== "function") {
+    api.logger.warn(`[web-telegram-mirror] skip-voice: telegram-runtime-unavailable ${logContext}`.trim());
+    return false;
+  }
+
+  let mediaPath;
+  try {
+    mediaPath = await generateVoiceMp3(text, cfg);
+    const sendResult = await sendMessageTelegram(target.to, "", {
+      accountId: target.accountId,
+      messageThreadId: target.threadId,
+      mediaUrl: mediaPath,
+      mediaLocalRoots: [cfg.voice.tempDir, tmpdir(), "/tmp"],
+      asVoice: true,
+      plainText: text,
+    });
+    api.logger.info(
+      `[web-telegram-mirror] voice-sent: to=${target.to} messageId=${sendResult?.messageId || ""} ${logContext}`.trim(),
+    );
+    cleanupFile(mediaPath);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    api.logger.error(
+      `[web-telegram-mirror] voice-failed: to=${target.to} error=${JSON.stringify(message)} ${logContext}`.trim(),
+    );
+    if (mediaPath) cleanupFile(mediaPath);
+    return false;
+  }
+}
+
 export default definePluginEntry({
   id: "web-telegram-mirror",
   name: "Web Telegram Mirror",
@@ -227,7 +316,7 @@ export default definePluginEntry({
   register(api) {
     const cfg = parseConfig(api.pluginConfig);
 
-    api.on("before_dispatch", async (event, ctx) => {
+    api.on("before_dispatch", async (event) => {
       if (!cfg.enabled) return;
       if (event?.channel !== "webchat") return;
 
@@ -248,9 +337,7 @@ export default definePluginEntry({
       const userText = normalizeMirrorText(rawUserText);
       const skipReason = shouldSkipText(userText, cfg.filters);
       if (skipReason) {
-        api.logger.info(
-          `[web-telegram-mirror] skip-user: reason=${skipReason} session=${sessionKey}`,
-        );
+        api.logger.info(`[web-telegram-mirror] skip-user: reason=${skipReason} session=${sessionKey}`);
         return;
       }
 
@@ -261,12 +348,10 @@ export default definePluginEntry({
         return;
       }
 
-      const mirroredUserText = `【Web】${userText}`;
+      const mirroredUserText = `${cfg.voice.prefix}${userText}`;
       const dedupeKey = makeDedupeKey(["user", sessionKey, senderId, target.to, mirroredUserText]);
       if (seenDedupe(dedupeKey, cfg.dedupeTtlMs, cfg.dedupeMaxEntries)) {
-        api.logger.info(
-          `[web-telegram-mirror] skip-user: dedupe-hit session=${sessionKey} to=${target.to}`,
-        );
+        api.logger.info(`[web-telegram-mirror] skip-user: dedupe-hit session=${sessionKey} to=${target.to}`);
         return;
       }
 
@@ -275,7 +360,7 @@ export default definePluginEntry({
       );
 
       if (cfg.observeOnly) return;
-      await sendMirror(api, target, mirroredUserText, "user-sent", `session=${sessionKey}`);
+      await sendTextMirror(api, target, mirroredUserText, "user-sent", `session=${sessionKey}`);
     });
 
     api.on("agent_end", async (event, ctx) => {
@@ -291,18 +376,14 @@ export default definePluginEntry({
       const assistantText = normalizeMirrorText(rawAssistantText);
       const skipReason = shouldSkipText(assistantText, cfg.filters);
       if (skipReason) {
-        api.logger.info(
-          `[web-telegram-mirror] skip: reason=${skipReason} session=${ctx.sessionKey || ""}`,
-        );
+        api.logger.info(`[web-telegram-mirror] skip: reason=${skipReason} session=${ctx.sessionKey || ""}`);
         return;
       }
 
       const entry = loadSessionStoreEntry(api, ctx?.sessionKey, ctx?.agentId);
       const target = resolveTelegramTarget(entry);
       if (!target) {
-        api.logger.warn(
-          `[web-telegram-mirror] skip: no-telegram-target session=${ctx?.sessionKey || ""}`,
-        );
+        api.logger.warn(`[web-telegram-mirror] skip: no-telegram-target session=${ctx?.sessionKey || ""}`);
         return;
       }
 
@@ -313,11 +394,8 @@ export default definePluginEntry({
         target.to,
         assistantText,
       ]);
-
       if (seenDedupe(dedupeKey, cfg.dedupeTtlMs, cfg.dedupeMaxEntries)) {
-        api.logger.info(
-          `[web-telegram-mirror] skip: dedupe-hit session=${ctx?.sessionKey || ""} to=${target.to}`,
-        );
+        api.logger.info(`[web-telegram-mirror] skip: dedupe-hit session=${ctx?.sessionKey || ""} to=${target.to}`);
         return;
       }
 
@@ -327,7 +405,13 @@ export default definePluginEntry({
       );
 
       if (cfg.observeOnly) return;
-      await sendMirror(api, target, assistantText, "sent", `session=${ctx?.sessionKey || ""}`);
+
+      if (cfg.voice.enabled && cfg.voice.assistantVoiceOnly) {
+        const ok = await sendVoiceMirror(api, target, assistantText, cfg, `session=${ctx?.sessionKey || ""}`);
+        if (ok) return;
+      }
+
+      await sendTextMirror(api, target, assistantText, "sent", `session=${ctx?.sessionKey || ""}`);
     });
   },
 });
