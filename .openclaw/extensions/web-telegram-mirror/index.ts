@@ -128,20 +128,17 @@ function stripReplyTag(text) {
 function stripMarkdownArtifacts(text) {
   return text
     .replace(/^#{1,6}\s+/gm, "")
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/__(.*?)__/g, "$1")
-    .replace(/(?<!\*)\*(?!\*)(.*?) (?<!\*)\*(?!\*)/g, "$1")
-    .replace(/(?<!_)_(?!_)(.*?) (?<!_)_(?!_)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(^|[^*])\*([^*\n]+)\*(?=[^*]|$)/g, "$1$2")
+    .replace(/(^|[^_])_([^_\n]+)_(?=[^_]|$)/g, "$1$2")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/^>\s?/gm, "")
-    .replace(/\[(.*?)\]\((https?:\/\/[^\s)]+)\)/g, "$1: $2");
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1: $2");
 }
 
 function normalizeMirrorText(text) {
-  const cleaned = stripMarkdownArtifacts(stripReplyTag(text))
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return cleaned;
+  return stripMarkdownArtifacts(stripReplyTag(text)).replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function shouldSkipText(text, filters) {
@@ -187,6 +184,42 @@ function resolveTelegramTarget(entry) {
   return null;
 }
 
+function loadSessionStoreEntry(api, sessionKey, agentId) {
+  try {
+    const storePath = api.runtime.agent.session.resolveStorePath(undefined, {
+      agentId,
+    });
+    const store = api.runtime.agent.session.loadSessionStore(storePath);
+    return sessionKey ? store[sessionKey] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function sendMirror(api, target, text, logPrefix, logContext = "") {
+  const sendMessageTelegram = getTelegramSender(api);
+  if (typeof sendMessageTelegram !== "function") {
+    api.logger.warn(`[web-telegram-mirror] skip: telegram-runtime-unavailable ${logContext}`.trim());
+    return;
+  }
+
+  try {
+    const sendResult = await sendMessageTelegram(target.to, text, {
+      accountId: target.accountId,
+      messageThreadId: target.threadId,
+      plainText: text,
+    });
+    api.logger.info(
+      `[web-telegram-mirror] ${logPrefix}: to=${target.to} messageId=${sendResult?.messageId || ""} ${logContext}`.trim(),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    api.logger.error(
+      `[web-telegram-mirror] ${logPrefix}-failed: to=${target.to} error=${JSON.stringify(message)} ${logContext}`.trim(),
+    );
+  }
+}
+
 export default definePluginEntry({
   id: "web-telegram-mirror",
   name: "Web Telegram Mirror",
@@ -194,11 +227,13 @@ export default definePluginEntry({
   register(api) {
     const cfg = parseConfig(api.pluginConfig);
 
-    api.on("before_dispatch", (event) => {
+    api.on("before_dispatch", async (event, ctx) => {
       if (!cfg.enabled) return;
       if (event?.channel !== "webchat") return;
+
       const senderId = typeof event?.senderId === "string" ? event.senderId : "";
       if (!cfg.senderIds.includes(senderId)) return;
+
       const sessionKey = typeof event?.sessionKey === "string" ? event.sessionKey : "";
       if (!sessionKey) return;
 
@@ -206,6 +241,41 @@ export default definePluginEntry({
       api.logger.info(
         `[web-telegram-mirror] source marked: session=${sessionKey} channel=webchat senderId=${senderId}`,
       );
+
+      if (sessionKey !== cfg.mainSessionKey) return;
+
+      const rawUserText = safeText(event?.body) || safeText(event?.content);
+      const userText = normalizeMirrorText(rawUserText);
+      const skipReason = shouldSkipText(userText, cfg.filters);
+      if (skipReason) {
+        api.logger.info(
+          `[web-telegram-mirror] skip-user: reason=${skipReason} session=${sessionKey}`,
+        );
+        return;
+      }
+
+      const entry = loadSessionStoreEntry(api, sessionKey, undefined);
+      const target = resolveTelegramTarget(entry);
+      if (!target) {
+        api.logger.warn(`[web-telegram-mirror] skip-user: no-telegram-target session=${sessionKey}`);
+        return;
+      }
+
+      const mirroredUserText = `【Web】${userText}`;
+      const dedupeKey = makeDedupeKey(["user", sessionKey, senderId, target.to, mirroredUserText]);
+      if (seenDedupe(dedupeKey, cfg.dedupeTtlMs, cfg.dedupeMaxEntries)) {
+        api.logger.info(
+          `[web-telegram-mirror] skip-user: dedupe-hit session=${sessionKey} to=${target.to}`,
+        );
+        return;
+      }
+
+      api.logger.info(
+        `[web-telegram-mirror] decision=user-mirror observeOnly=${String(cfg.observeOnly)} session=${sessionKey} to=${target.to} preview=${JSON.stringify(mirroredUserText.slice(0, 120))}`,
+      );
+
+      if (cfg.observeOnly) return;
+      await sendMirror(api, target, mirroredUserText, "user-sent", `session=${sessionKey}`);
     });
 
     api.on("agent_end", async (event, ctx) => {
@@ -227,13 +297,8 @@ export default definePluginEntry({
         return;
       }
 
-      const storePath = api.runtime.agent.session.resolveStorePath(undefined, {
-        agentId: ctx?.agentId,
-      });
-      const store = api.runtime.agent.session.loadSessionStore(storePath);
-      const entry = ctx?.sessionKey ? store[ctx.sessionKey] : undefined;
+      const entry = loadSessionStoreEntry(api, ctx?.sessionKey, ctx?.agentId);
       const target = resolveTelegramTarget(entry);
-
       if (!target) {
         api.logger.warn(
           `[web-telegram-mirror] skip: no-telegram-target session=${ctx?.sessionKey || ""}`,
@@ -242,6 +307,7 @@ export default definePluginEntry({
       }
 
       const dedupeKey = makeDedupeKey([
+        "assistant",
         ctx?.sessionKey || "",
         ctx?.sessionId || "",
         target.to,
@@ -261,28 +327,7 @@ export default definePluginEntry({
       );
 
       if (cfg.observeOnly) return;
-
-      const sendMessageTelegram = getTelegramSender(api);
-      if (typeof sendMessageTelegram !== "function") {
-        api.logger.warn("[web-telegram-mirror] skip: telegram-runtime-unavailable");
-        return;
-      }
-
-      try {
-        const sendResult = await sendMessageTelegram(target.to, assistantText, {
-          accountId: target.accountId,
-          messageThreadId: target.threadId,
-          plainText: assistantText,
-        });
-        api.logger.info(
-          `[web-telegram-mirror] sent: session=${ctx?.sessionKey || ""} to=${target.to} messageId=${sendResult?.messageId || ""}`,
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        api.logger.error(
-          `[web-telegram-mirror] send-failed: session=${ctx?.sessionKey || ""} to=${target.to} error=${JSON.stringify(message)}`,
-        );
-      }
+      await sendMirror(api, target, assistantText, "sent", `session=${ctx?.sessionKey || ""}`);
     });
   },
 });
