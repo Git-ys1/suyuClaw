@@ -380,33 +380,6 @@ function appendVoiceLinkToMessage(message, linkLine) {
   return message;
 }
 
-function appendVoiceMediaToMessage(message, mediaUrl) {
-  if (!message || typeof message !== "object" || !mediaUrl) return message;
-  const next = { ...message };
-  const audioBlock = { type: "audio", url: mediaUrl };
-  if (Array.isArray(next.content)) {
-    const blocks = [...next.content];
-    const hasSameAudio = blocks.some(
-      (block) => block && typeof block === "object" && block.type === "audio" && block.url === mediaUrl,
-    );
-    if (!hasSameAudio) {
-      blocks.push(audioBlock);
-      next.content = blocks;
-      return next;
-    }
-    return message;
-  }
-  if (typeof next.content === "string") {
-    next.content = [{ type: "text", text: next.content }, audioBlock];
-    return next;
-  }
-  if (typeof next.text === "string") {
-    next.content = [{ type: "text", text: next.text }, audioBlock];
-    return next;
-  }
-  return message;
-}
-
 function stripVoiceLinkSuffix(text, cfg) {
   const label = (cfg.voice.webLink.label || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!label) return text;
@@ -474,7 +447,7 @@ async function sendVoiceMirror(api, target, mediaPath, cfg, logContext = "") {
       mediaUrl: mediaPath,
       mediaLocalRoots: [cfg.voice.tempDir, tmpdir(), "/tmp", "/home/yusu/.openclaw/workspace/skills/telegram-voice-tts/scripts"],
       asVoice: true,
-      plainText: text,
+      plainText: "",
     });
     api.logger.info(
       `[web-telegram-mirror] voice-sent: to=${target.to} messageId=${sendResult?.messageId || ""} ${logContext}`.trim(),
@@ -499,7 +472,21 @@ export default definePluginEntry({
       ensureWebVoiceServer(api, cfg);
     }
 
-    api.on("before_message_write", async (event, ctx) => {
+    api.on("llm_output", async (event, ctx) => {
+      if (!cfg.enabled) return;
+      if (!cfg.voice.enabled || !cfg.voice.webLink.enabled || !cfg.voice.webLink.includeInMessage) return;
+      if (ctx?.sessionKey !== cfg.mainSessionKey) return;
+      if (!hasRecentWebSource(ctx.sessionKey)) return;
+      const assistantText = normalizeMirrorText(safeText(Array.isArray(event?.assistantTexts) ? event.assistantTexts[event.assistantTexts.length - 1] : ""));
+      if (!assistantText) return;
+      const voiceHash = buildVoiceHash(assistantText);
+      const preparedFromCache = voiceAssetBySession.get(ctx.sessionKey);
+      if (preparedFromCache && preparedFromCache.hash === voiceHash) return;
+      const prepared = await generateVoiceOgg(assistantText, cfg);
+      voiceAssetBySession.set(ctx.sessionKey, prepared);
+    });
+
+    api.on("before_message_write", (event, ctx) => {
       if (!cfg.enabled) return;
       if (!cfg.voice.enabled || !cfg.voice.webLink.enabled || !cfg.voice.webLink.includeInMessage) return;
       if (ctx?.sessionKey !== cfg.mainSessionKey) return;
@@ -508,13 +495,15 @@ export default definePluginEntry({
       if (!msg || msg.role !== "assistant") return;
       const assistantText = normalizeMirrorText(safeText(extractTextFromContent(msg.content)));
       if (!assistantText) return;
-      const prepared = await generateVoiceOgg(assistantText, cfg);
-      voiceAssetBySession.set(ctx.sessionKey, prepared);
+      const expectedHash = buildVoiceHash(assistantText);
+      const prepared = voiceAssetBySession.get(ctx.sessionKey);
+      if (!prepared || prepared.hash !== expectedHash) {
+        return;
+      }
       const linkLine = cfg.voice.webLink.linkTemplate
         .replace("{label}", cfg.voice.webLink.label)
         .replace("{url}", prepared.mediaUrl);
-      const withAudio = appendVoiceMediaToMessage(msg, prepared.mediaUrl);
-      const patchedMessage = appendVoiceLinkToMessage(withAudio, linkLine);
+      const patchedMessage = appendVoiceLinkToMessage(msg, linkLine);
       if (patchedMessage === msg) return;
       return { message: patchedMessage };
     });
