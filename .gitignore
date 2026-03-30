@@ -2,5 +2,13 @@
 releases/*
 !releases/state/
 releases/state/*
+!releases/state/latest/
+!releases/state/old/
+releases/state/latest/*
+releases/state/old/*
 !releases/state/*.enc
 !releases/state/*.sha256
+!releases/state/latest/*.enc
+!releases/state/latest/*.sha256
+!releases/state/old/*.enc
+!releases/state/old/*.sha256
